@@ -1,0 +1,9 @@
+{
+  "name": "brightpath-learning-assistant",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "api": "python -m uvicorn app.main:app --reload --app-dir apps/api --env-file apps/api/.env"
+  }
+}
