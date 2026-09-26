@@ -79,6 +79,8 @@ For a new request, the backend:
 
 `apps/api/app/supabase_store.py` calls the Supabase REST API with the server-only `SUPABASE_SECRET_KEY`.
 
+The API has four active default safety profiles: `Less than 10`, `10-13`, `13-15`, and `15-17`. Each profile version stores a prompt plus input and output caps for all OpenAI moderation score categories. LLM requests default to `Less than 10`; API callers can set the `safety_profile` request field to another supported profile. The backend loads that profile from Supabase, applies its input and output thresholds, and appends its prompt to the LLM system instructions.
+
 The application currently persists idempotency records in `public.api_responses`:
 
 | Column | Purpose |
@@ -113,6 +115,7 @@ Important API variables:
 | `OPENAI_API_KEY` | Optional server-only key to enable model-generated learning replies. |
 | `LLM_ENABLED` | Enables LLM responses by default when an OpenAI key is available. |
 | `LLM_MODERATION_ENABLED` | Enables OpenAI moderation before and after optional generation. |
+| `Admin_Password` | Server-only password for the `admin` login. Required before the admin page can be used. |
 
 Important web variables:
 
@@ -129,6 +132,17 @@ The deployed Supabase project should include:
 
 1. `0001_foundation.sql` — primary application tables, types, indexes, RLS, and child read policies.
 2. `0002_api_response_store.sql` — idempotent API response storage.
+3. `0003_default_safety_profiles.sql` — four default age-band profiles, prompts, and moderation score caps.
+4. `0004_admin_users.sql` — admin-managed users with internal UUIDs, salted password hashes, and safety-profile links.
+
+## Administration
+
+Select **Admin settings** in the browser UI and sign in as `admin` with the value in `Admin_Password`. The browser receives a short-lived session token and can use two protected tabs:
+
+- **User management** creates and edits a user's name, optional email, username, password, and selected safety profile. The internal UUID is retained by the API but never rendered in the UI.
+- **Safety profiles** edits the prompt and all input/output moderation score caps for each age band. The FastAPI server reads the active profile before every LLM call.
+
+User passwords are salted and hashed with `scrypt` before storage. The admin password and Supabase secret key are never sent to the browser.
 
 Apply migrations through the Supabase CLI or the authenticated Supabase management connection. After schema changes, verify table existence and review Supabase security advisors.
 

@@ -13,13 +13,14 @@ from collections import defaultdict
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .admin_auth import hash_password, issue_admin_token, password_matches, require_admin
 from .llm import generate_learning_reply, llm_ready
 from .settings import settings
-from .supabase_store import SupabaseStoreError, store
+from .supabase_store import SafetyProfile, SupabaseStoreError, store
 
 app = FastAPI(title="BrightPath API", docs_url=None if settings.app_env == "production" else "/docs")
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["Content-Type", "Idempotency-Key", "Authorization"])
@@ -29,6 +30,7 @@ class ChatRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=120)
     content: str = Field(min_length=1, max_length=1200)
     use_llm: bool | None = None
+    safety_profile: Literal["Less than 10", "10-13", "13-15", "15-17"] = "Less than 10"
 
 
 class ChatResponse(BaseModel):
@@ -42,6 +44,50 @@ class ChatResponse(BaseModel):
 class SafetyDecision(BaseModel):
     action: Literal["allow", "guided", "block", "support"]
     reason: str
+
+
+MODERATION_CATEGORIES = {
+    "harassment",
+    "harassment/threatening",
+    "hate",
+    "hate/threatening",
+    "illicit",
+    "illicit/violent",
+    "self-harm",
+    "self-harm/intent",
+    "self-harm/instructions",
+    "sexual",
+    "sexual/minors",
+    "violence",
+    "violence/graphic",
+}
+
+
+class AdminLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class AdminUserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str | None = Field(default=None, max_length=254)
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=8, max_length=256)
+    safety_profile: Literal["Less than 10", "10-13", "13-15", "15-17"] = "Less than 10"
+
+
+class AdminUserUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    email: str | None = Field(default=None, max_length=254)
+    username: str = Field(min_length=3, max_length=80)
+    password: str | None = Field(default=None, min_length=8, max_length=256)
+    safety_profile: Literal["Less than 10", "10-13", "13-15", "15-17"] = "Less than 10"
+
+
+class SafetyProfileUpdate(BaseModel):
+    prompt_content: str = Field(min_length=1, max_length=8000)
+    input_thresholds: dict[str, float]
+    output_thresholds: dict[str, float]
 
 
 request_times: defaultdict[str, list[float]] = defaultdict(list)
@@ -114,6 +160,18 @@ def should_use_llm(requested: bool | None) -> bool:
     return requested
 
 
+def _store_or_503(call):
+    try:
+        return call()
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail="Admin storage is unavailable") from exc
+
+
+def _validate_thresholds(thresholds: dict[str, float]) -> None:
+    if set(thresholds) != MODERATION_CATEGORIES or any(not 0 <= score <= 1 for score in thresholds.values()):
+        raise HTTPException(status_code=422, detail="Every moderation category must have a score from 0 to 1")
+
+
 @app.get("/health")
 def health() -> dict[str, object]:
     ready = llm_ready()
@@ -136,6 +194,43 @@ def health() -> dict[str, object]:
     }
 
 
+@app.post("/v1/admin/login")
+def admin_login(payload: AdminLoginRequest) -> dict[str, str]:
+    if payload.username != "admin" or not password_matches(payload.password):
+        raise HTTPException(status_code=401, detail="Invalid administrator credentials")
+    return {"token": issue_admin_token()}
+
+
+@app.get("/v1/admin/users", dependencies=[Depends(require_admin)])
+def list_admin_users() -> list[dict[str, object]]:
+    return _store_or_503(store.list_users)
+
+
+@app.post("/v1/admin/users", dependencies=[Depends(require_admin)])
+def create_admin_user(payload: AdminUserCreate) -> dict[str, object]:
+    return _store_or_503(lambda: store.create_user(payload.name, payload.email, payload.username, hash_password(payload.password), payload.safety_profile))
+
+
+@app.put("/v1/admin/users/{user_id}", dependencies=[Depends(require_admin)])
+def update_admin_user(user_id: str, payload: AdminUserUpdate) -> dict[str, object]:
+    values: dict[str, object] = {"display_name": payload.name, "email": payload.email, "username": payload.username}
+    if payload.password:
+        values["password_hash"] = hash_password(payload.password)
+    return _store_or_503(lambda: store.update_user(user_id, values, payload.safety_profile))
+
+
+@app.get("/v1/admin/safety-profiles", dependencies=[Depends(require_admin)])
+def list_admin_safety_profiles() -> list[dict[str, object]]:
+    return _store_or_503(store.list_safety_profiles)
+
+
+@app.put("/v1/admin/safety-profiles/{profile_name}", dependencies=[Depends(require_admin)])
+def update_admin_safety_profile(profile_name: Literal["Less than 10", "10-13", "13-15", "15-17"], payload: SafetyProfileUpdate) -> dict[str, object]:
+    _validate_thresholds(payload.input_thresholds)
+    _validate_thresholds(payload.output_thresholds)
+    return _store_or_503(lambda: store.update_safety_profile(profile_name, payload.prompt_content, payload.input_thresholds, payload.output_thresholds))
+
+
 @app.post("/v1/chat/messages", response_model=ChatResponse)
 def create_message(payload: ChatRequest, request: Request, idempotency_key: str = Header(..., alias="Idempotency-Key")) -> ChatResponse:
     rate_limit(request)
@@ -152,7 +247,11 @@ def create_message(payload: ChatRequest, request: Request, idempotency_key: str 
     elif decision.action == "block":
         answer = safe_block_reply()
     elif should_use_llm(payload.use_llm):
-        generated = generate_learning_reply(payload.content, decision.action == "guided")
+        try:
+            safety_profile: SafetyProfile = store.get_active_safety_profile(payload.safety_profile)
+        except SupabaseStoreError as exc:
+            raise HTTPException(status_code=503, detail="Safety profile storage is unavailable") from exc
+        generated = generate_learning_reply(payload.content, decision.action == "guided", safety_profile)
         if generated:
             answer = generated
             source = "llm"

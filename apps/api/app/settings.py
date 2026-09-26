@@ -45,6 +45,8 @@ class Settings:
     moderation_enabled = _bool("LLM_MODERATION_ENABLED", True)
     supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
     supabase_secret_key = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    admin_password = os.getenv("Admin_Password", "").strip()
+    admin_token_ttl_seconds = _int("ADMIN_TOKEN_TTL_SECONDS", 28800)
 
     @property
     def llm_ready(self) -> bool:
