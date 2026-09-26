@@ -43,6 +43,8 @@ class Settings:
     openai_temperature = _float("OPENAI_TEMPERATURE", 0.4)
     openai_max_tokens = _int("OPENAI_MAX_TOKENS", 280)
     moderation_enabled = _bool("LLM_MODERATION_ENABLED", True)
+    supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    supabase_secret_key = os.getenv("SUPABASE_SECRET_KEY", "").strip()
 
     @property
     def llm_ready(self) -> bool:

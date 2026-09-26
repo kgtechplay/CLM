@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from .llm import generate_learning_reply, llm_ready
 from .settings import settings
+from .supabase_store import SupabaseStoreError, store
 
 app = FastAPI(title="BrightPath API", docs_url=None if settings.app_env == "production" else "/docs")
 app.add_middleware(CORSMiddleware, allow_origins=settings.allowed_origins, allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["Content-Type", "Idempotency-Key", "Authorization"])
@@ -43,7 +44,6 @@ class SafetyDecision(BaseModel):
     reason: str
 
 
-responses_by_key: dict[str, ChatResponse] = {}
 request_times: defaultdict[str, list[float]] = defaultdict(list)
 
 HARD_BLOCK_PATTERNS = [
@@ -117,8 +117,18 @@ def should_use_llm(requested: bool | None) -> bool:
 @app.get("/health")
 def health() -> dict[str, object]:
     ready = llm_ready()
+    database = "ok"
+    database_error = None
+    try:
+        store.get_response("__health_check__")
+    except SupabaseStoreError as exc:
+        database = "error"
+        if settings.app_env != "production":
+            database_error = str(exc)
     return {
         "status": "ok",
+        "database": database,
+        "database_error": database_error,
         "mode": "llm" if ready and settings.llm_enabled else "safe-local-demo",
         "llm_available": ready,
         "llm_enabled_default": settings.llm_enabled and ready,
@@ -129,8 +139,12 @@ def health() -> dict[str, object]:
 @app.post("/v1/chat/messages", response_model=ChatResponse)
 def create_message(payload: ChatRequest, request: Request, idempotency_key: str = Header(..., alias="Idempotency-Key")) -> ChatResponse:
     rate_limit(request)
-    if idempotency_key in responses_by_key:
-        return responses_by_key[idempotency_key]
+    try:
+        stored = store.get_response(idempotency_key)
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail="Persistent storage is unavailable") from exc
+    if stored is not None:
+        return ChatResponse.model_validate(stored)
     decision = decide_input(payload.content)
     source: Literal["local", "llm"] = "local"
     if decision.action == "support":
@@ -153,5 +167,8 @@ def create_message(payload: ChatRequest, request: Request, idempotency_key: str 
         topic=classify_topic(payload.content),
         source=source,
     )
-    responses_by_key[idempotency_key] = response
-    return response
+    try:
+        stored = store.save_response(idempotency_key, payload.conversation_id, response.model_dump(mode="json"))
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail="Persistent storage is unavailable") from exc
+    return ChatResponse.model_validate(stored)
