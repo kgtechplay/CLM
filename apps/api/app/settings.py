@@ -47,6 +47,7 @@ class Settings:
     supabase_secret_key = os.getenv("SUPABASE_SECRET_KEY", "").strip()
     admin_password = os.getenv("Admin_Password", "").strip()
     admin_token_ttl_seconds = _int("ADMIN_TOKEN_TTL_SECONDS", 28800)
+    safety_profile_cache_ttl_seconds = _int("SAFETY_PROFILE_CACHE_TTL_SECONDS", 300)
 
     @property
     def llm_ready(self) -> bool:

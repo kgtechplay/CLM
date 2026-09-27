@@ -81,6 +81,8 @@ For a new request, the backend:
 
 The API has four active default safety profiles: `Less than 10`, `10-13`, `13-15`, and `15-17`. Each profile version stores a prompt plus input and output caps for all OpenAI moderation score categories. LLM requests default to `Less than 10`; API callers can set the `safety_profile` request field to another supported profile. The backend loads that profile from Supabase, applies its input and output thresholds, and appends its prompt to the LLM system instructions.
 
+Active profiles are cached in the API process for `SAFETY_PROFILE_CACHE_TTL_SECONDS` (five minutes by default). Saving a profile from the admin area immediately invalidates its cached entry.
+
 The application currently persists idempotency records in `public.api_responses`:
 
 | Column | Purpose |

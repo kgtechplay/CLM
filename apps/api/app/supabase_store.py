@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -35,6 +37,8 @@ class SupabaseStore:
         self.rest_url = f"{settings.supabase_url.rstrip('/')}/rest/v1"
         self.endpoint = f"{self.rest_url}/api_responses"
         self.headers = self._headers()
+        self._profile_cache: dict[str, tuple[float, SafetyProfile]] = {}
+        self._profile_cache_lock = Lock()
 
     def _headers(self) -> dict[str, str]:
         key = settings.supabase_secret_key
@@ -76,6 +80,18 @@ class SupabaseStore:
         return stored
 
     def get_active_safety_profile(self, name: str) -> SafetyProfile:
+        with self._profile_cache_lock:
+            cached = self._profile_cache.get(name)
+            if cached and cached[0] > time.monotonic():
+                return cached[1]
+        profile = self._fetch_active_safety_profile(name)
+        ttl = max(settings.safety_profile_cache_ttl_seconds, 0)
+        if ttl:
+            with self._profile_cache_lock:
+                self._profile_cache[name] = (time.monotonic() + ttl, profile)
+        return profile
+
+    def _fetch_active_safety_profile(self, name: str) -> SafetyProfile:
         profile_name = quote(name, safe="")
         definitions = self._request(
             "GET",
@@ -118,7 +134,7 @@ class SupabaseStore:
         ]
 
     def update_safety_profile(self, name: str, prompt_content: str, input_thresholds: dict[str, float], output_thresholds: dict[str, float]) -> dict[str, Any]:
-        profile = self.get_active_safety_profile(name)
+        profile = self._fetch_active_safety_profile(name)
         rows = self._request(
             "PATCH",
             f"{self.rest_url}/safety_profile_versions?safety_profile_id=eq.{self._definition_id(name)}&status=eq.active",
@@ -127,6 +143,8 @@ class SupabaseStore:
         ).json()
         if not rows:
             raise SupabaseStoreError(f"Safety profile {profile.name!r} has no active version")
+        with self._profile_cache_lock:
+            self._profile_cache.pop(name, None)
         return rows[0]
 
     def list_users(self) -> list[dict[str, Any]]:
